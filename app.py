@@ -9,6 +9,7 @@ import requests
 from playwright.sync_api import sync_playwright
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
+import traceback
 
 # Load environment variables
 load_dotenv()
@@ -19,13 +20,15 @@ def human_sleep():
     time.sleep(random.uniform(1, 5))
 
 def run_scan(page, script_text, filename):
+    print(f"📝 Running scan for: {filename}")
     page.goto("https://stockcharts.com/def/servlet/ScanUI")
     human_sleep()
 
+    safe_script = json.dumps(script_text)
     page.evaluate(f"""
         () => {{
             let editor = window.ace.edit("clauses-ace");
-            editor.setValue(`{script_text}`, -1);
+            editor.setValue({safe_script}, -1);
         }}
     """)
     human_sleep()
@@ -64,17 +67,12 @@ def merge_csvs_to_json(output_file="merged_output.json"):
         except Exception as e:
             print(f"⚠️ Error deleting '{csv_file}': {e}")
 
-def boomi_api_push(json_file="merged_output.json"):
+    return merged_data  # Return merged data for response
+
+def boomi_api_push(data):
     url = os.getenv("BOOMI_API_URL")
     username = os.getenv("BOOMI_USERNAME")
     password = os.getenv("BOOMI_PASSWORD")
-
-    if not os.path.exists(json_file):
-        print(f"❌ JSON file '{json_file}' not found. Run merge first.")
-        return
-
-    with open(json_file, "r") as f:
-        data = json.load(f)
 
     print("🔁 Sending POST request to Boomi API...")
     response = requests.post(
@@ -90,14 +88,17 @@ def boomi_api_push(json_file="merged_output.json"):
         print(f"❌ Failed to push data. Status: {response.status_code}, Response: {response.text}")
 
 def run_pipeline_process():
+    print("🚀 Starting pipeline process...")
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)  # headless for server/cloud
+        browser = p.chromium.launch(headless=False)  # Headed mode for visibility
         context = browser.new_context(accept_downloads=True)
         page = context.new_page()
 
+        print("🌐 Navigating to StockCharts login...")
         page.goto("https://stockcharts.com/login/index.php")
         human_sleep()
 
+        print("🔐 Filling login form...")
         page.fill('input[name="form_UserID"]', os.getenv("STOCKCHARTS_USER_ID"))
         human_sleep()
 
@@ -105,28 +106,37 @@ def run_pipeline_process():
         human_sleep()
 
         page.keyboard.press("Enter")
-        human_sleep()
+        print("⏳ Waiting for login to complete...")
+        time.sleep(5)
 
+        print("⚙️ Running scans...")
         run_scan(page, "[favorites list is 34]\nRank by daily chande trend meter", "daily.csv")
         run_scan(page, "[favorites list is 34]\nRank by weekly chande trend meter", "weekly.csv")
         run_scan(page, "[favorites list is 34]\nRank by month chande trend meter", "monthly.csv")
-        time.sleep(5)
+
         browser.close()
 
-        merge_csvs_to_json()
-        boomi_api_push()
-        print("🎉 All tasks completed.")
+        print("📦 Merging CSVs...")
+        merged_data = merge_csvs_to_json()
 
+        print("📤 Pushing to Boomi...")
+        boomi_api_push(merged_data)
 
-# Health check endpoint for Render
+        print("🎉 All tasks completed successfully.")
+        return merged_data
+
+# Health check
 @app.get("/")
 def root():
     return {"status": "ok", "message": "FastAPI is running."}
 
-@app.post("/run-pipeline")
+# ✅ GET endpoint that performs the pipeline and returns the data
+@app.get("/run-pipeline")
 def run_pipeline():
     try:
-        run_pipeline_process()
-        return {"status": "success", "message": "Pipeline completed."}
+        data = run_pipeline_process()
+        return {"status": "success", "message": "Pipeline completed.", "data": data}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        print("❌ Exception occurred in /run-pipeline:")
+        traceback.print_exc()
+        return {"status": "error", "message": str(e) or "Unknown error occurred"}
