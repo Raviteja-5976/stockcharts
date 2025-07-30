@@ -1,0 +1,7 @@
+# Render deployment configuration
+services:
+  - type: web
+    name: stockcharts-fastapi
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
